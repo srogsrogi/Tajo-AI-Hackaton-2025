@@ -1,7 +1,7 @@
 # app.py
 import os, json, base64, asyncio, websockets
 from fastapi import FastAPI, WebSocket, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.websockets import WebSocketDisconnect
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from dotenv import load_dotenv
@@ -56,7 +56,9 @@ async def handle_incoming_call(request: Request):
     twiml_response = str(response)
     print(f"TwiML Response: {twiml_response}")
 
-    return HTMLResponse(content=twiml_response, media_type="application/xml")
+    # Twilio는 text/xml (또는 application/xml) 헤더를 기대하지만 공식 문서에는 text/xml이 명시돼 있습니다.
+    # FastAPI의 Response 클래스를 사용해 명확하게 text/xml로 지정합니다.
+    return Response(content=twiml_response, media_type="text/xml")
 
 
 @app.websocket("/media-stream")
@@ -200,4 +202,5 @@ async def send_session_update(openai_ws):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app:app", host="0.0.0.0", port=PORT)
+    # 현재 파일 이름은 main.py이므로 uvicorn에서 main:app으로 모듈을 지정해야 합니다.
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT)
