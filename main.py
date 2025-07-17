@@ -1,10 +1,17 @@
 # app.py
-import os, json, base64, asyncio, websockets
+import os, json, base64, asyncio, websockets, logging
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse
 from fastapi.websockets import WebSocketDisconnect
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from dotenv import load_dotenv
+
+# 로깅 설정
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 app = FastAPI()
@@ -114,7 +121,11 @@ async def handle_media_stream(websocket: WebSocket):
                 try:
                     async for msg in openai_ws:
                         res = json.loads(msg)
-                        if res.get('type') == 'response.audio.delta' and 'delta' in res:
+                        msg_type = res.get('type', 'unknown')
+                        logger.debug(f"Received from OpenAI: {msg_type}")
+                        
+                        if msg_type == 'response.audio.delta' and 'delta' in res:
+                            # 오디오 데이터 처리
                             payload = base64.b64encode(base64.b64decode(res['delta'])).decode()
                             await websocket.send_json({
                                 "event": "media",
@@ -122,17 +133,63 @@ async def handle_media_stream(websocket: WebSocket):
                                 "media": {"payload": payload}
                             })
 
+                            # 응답 시작 시간 기록
                             if response_start_timestamp_twilio is None:
                                 response_start_timestamp_twilio = latest_media_timestamp
+                                logger.info("Started sending audio response to Twilio")
 
+                            # 아이템 ID 업데이트
                             if res.get('item_id'):
                                 last_assistant_item = res['item_id']
                             await send_mark(websocket, stream_sid)
 
-                        elif res.get('type') == 'input_audio_buffer.speech_started' and last_assistant_item:
+                        elif msg_type == 'input_audio_buffer.speech_started' and last_assistant_item:
+                            logger.warning("Speech interruption detected")
                             await handle_interruption()
+                            
+                        elif msg_type == 'error':
+                            logger.error(f"OpenAI Error: {res}")
+                            # 에러 발생 시 적절한 처리
+                            error_code = res.get('error', {}).get('code', 'unknown')
+                            error_message = res.get('error', {}).get('message', 'Unknown error')
+                            logger.error(f"Error details - Code: {error_code}, Message: {error_message}")
+                            
+                        elif msg_type == 'session.created':
+                            logger.info("OpenAI session created successfully")
+                            
+                        elif msg_type == 'response.created':
+                            logger.info("OpenAI response created")
+                            
+                        elif msg_type == 'response.done':
+                            logger.info("OpenAI response completed")
+                            # 응답 완료 시 상태 초기화
+                            response_start_timestamp_twilio = None
+                            
+                        elif msg_type == 'conversation.item.created':
+                            logger.debug("Conversation item created")
+                            
+                        elif msg_type == 'input_audio_buffer.committed':
+                            logger.debug("Audio buffer committed")
+                            
+                        elif msg_type == 'input_audio_buffer.cleared':
+                            logger.debug("Audio buffer cleared")
+                            
+                        else:
+                            # 알려지지 않은 메시지 타입 로깅
+                            logger.warning(f"Unhandled message type: {msg_type}")
+                            
+                except websockets.exceptions.ConnectionClosed:
+                    logger.warning("OpenAI WebSocket connection closed")
+                    break
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON decode error in send_to_twilio: {e}")
+                    continue  # JSON 에러는 건너뛰고 계속 진행
                 except Exception as e:
-                    print(f"Error in send_to_twilio: {e}")
+                    logger.error(f"Error in send_to_twilio: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # 심각한 에러 발생 시 재연결 시도 또는 정리 작업
+                    break
 
             async def handle_interruption():
                 nonlocal last_assistant_item, response_start_timestamp_twilio
