@@ -133,30 +133,28 @@ async def handle_media_stream(websocket: WebSocket):
                 try:
                     async for msg in websocket.iter_text():
                         data = json.loads(msg)
-                        logger.debug(f"🔵 Received from Twilio: {data['event']}")
+                        logger.debug(f"Twilio: {data['event']}")
 
                         if data['event'] == 'media' and openai_ws.open:
                             latest_media_timestamp = int(data['media']['timestamp'])
-                            logger.debug(f"📤 Sending audio data to OpenAI (timestamp: {latest_media_timestamp})")
                             await openai_ws.send(json.dumps({
                                 "type": "input_audio_buffer.append",
                                 "audio": data['media']['payload']
                             }))
                         elif data['event'] == 'start':
                             stream_sid = data['start']['streamSid']
-                            logger.info(f"🟢 Stream started with SID: {stream_sid}")
+                            logger.info(f"Stream started: {stream_sid}")
                         elif data['event'] == 'mark' and mark_queue:
-                            logger.debug(f"✅ Mark received, removing from queue")
                             mark_queue.pop(0)
                         elif data['event'] == 'stop':
-                            logger.info("🔴 Stream stopped")
+                            logger.info("Stream stopped")
                             break
                 except WebSocketDisconnect:
-                    logger.warning("🔌 Twilio WebSocket disconnected")
+                    logger.warning("Twilio disconnected")
                     if openai_ws.open:
                         await openai_ws.close()
                 except Exception as e:
-                    logger.error(f"❌ Error in receive_from_twilio: {e}")
+                    logger.error(f"Error in receive_from_twilio: {e}")
 
             async def send_to_twilio():
                 nonlocal last_assistant_item, response_start_timestamp_twilio
@@ -164,11 +162,7 @@ async def handle_media_stream(websocket: WebSocket):
                     async for msg in openai_ws:
                         res = json.loads(msg)
                         event_type = res.get('type', 'unknown')
-                        logger.debug(f"🟡 Received from OpenAI: {event_type}")
-                        
-                        # 전체 메시지 내용 로깅 (민감한 정보 제외)
-                        if event_type not in ['response.audio.delta']:  # 오디오 데이터는 너무 길어서 제외
-                            logger.debug(f"📋 OpenAI message details: {json.dumps(res, indent=2, ensure_ascii=False)}")
+                        logger.debug(f"OpenAI: {event_type}")
 
                         if res.get('type') == 'response.audio.delta' and 'delta' in res:
                             payload = base64.b64encode(base64.b64decode(res['delta'])).decode()
@@ -177,99 +171,50 @@ async def handle_media_stream(websocket: WebSocket):
                                 "streamSid": stream_sid,
                                 "media": {"payload": payload}
                             })
-                            logger.debug(f"🔊 Sent audio delta to Twilio")
-
                             if response_start_timestamp_twilio is None:
                                 response_start_timestamp_twilio = latest_media_timestamp
-                                logger.info("🎵 Started sending audio response to Twilio")
+                                logger.info("Started audio response")
 
                             if res.get('item_id'):
                                 last_assistant_item = res['item_id']
                             await send_mark(websocket, stream_sid)
 
                         elif res.get('type') == 'input_audio_buffer.speech_stopped':
-                            logger.info("🤐 User speech stopped detected")
+                            logger.info("User speech stopped")
 
                         elif res.get('type') == 'input_audio_buffer.committed':
-                            logger.info("💾 User audio committed to conversation")
-                            # 사용자 음성이 커밋된 후 응답 생성 트리거
-                            logger.info("🎯 Triggering response generation after user input")
-                            await openai_ws.send(json.dumps({
-                                "type": "response.create",
-                                "response": {
-                                    "modalities": ["text", "audio"]
-                                }
-                            }))
-
-                        elif res.get('type') == 'conversation.item.created':
-                            logger.info(f"💬 Conversation item created: {res.get('item', {}).get('type', 'unknown')}")
-                            if res.get('item', {}).get('type') == 'message':
-                                role = res.get('item', {}).get('role', 'unknown')
-                                content = res.get('item', {}).get('content', [])
-                                logger.info(f"📝 Message from {role}: {content}")
-                                
-                                # 사용자 메시지인 경우 특별히 로깅
-                                if role == 'user':
-                                    logger.info(f"👤 USER INPUT DETECTED: {content}")
+                            logger.info("User audio committed")
 
                         elif res.get('type') == 'conversation.item.input_audio_transcription.completed':
                             transcript = res.get('transcript', '')
-                            logger.info(f"🎤 User speech transcribed: '{transcript}'")
+                            logger.info(f"User said: '{transcript}'")
 
                         elif res.get('type') == 'response.created':
-                            logger.info("🚀 OpenAI response created")
-
-                        elif res.get('type') == 'response.output_item.added':
-                            logger.info("➕ Response output item added")
-
-                        elif res.get('type') == 'response.content_part.added':
-                            logger.info("📄 Response content part added")
-
-                        elif res.get('type') == 'response.audio_transcript.delta':
-                            transcript = res.get('delta', '')
-                            logger.info(f"📝 AI transcript delta: '{transcript}'")
+                            logger.info("AI response created")
 
                         elif res.get('type') == 'response.audio_transcript.done':
                             transcript = res.get('transcript', '')
-                            logger.info(f"✅ AI final transcript: '{transcript}'")
+                            logger.info(f"AI said: '{transcript}'")
 
                         elif res.get('type') == 'response.done':
-                            logger.info("🏁 OpenAI response completed")
+                            logger.info("AI response completed")
                             response_start_timestamp_twilio = None
 
+                        elif res.get('type') == 'input_audio_buffer.speech_started' and last_assistant_item:
+                            logger.info("Speech interruption detected")
+                            await handle_interruption()
+
                         elif res.get('type') == 'error':
-                            logger.error(f"❌ OpenAI Error: {res}")
-
-                        elif res.get('type') == 'session.created':
-                            logger.info("🎯 OpenAI session created successfully")
-
-                        elif res.get('type') == 'session.updated':
-                            logger.info("🔄 OpenAI session updated")
-
-                        elif res.get('type') == 'input_audio_buffer.speech_started':
-                            logger.info("🗣️ User speech started detected")
-                            if last_assistant_item:
-                                logger.info("⚠️ Speech interruption detected - handling interruption")
-                                await handle_interruption()
-
-                        elif res.get('type') == 'rate_limits.updated':
-                            logger.debug(f"📊 Rate limits updated: {res.get('rate_limits', {})}")
-
-                        else:
-                            logger.debug(f"❓ Unhandled OpenAI event type: {event_type}")
-                            # 알려지지 않은 이벤트의 전체 내용도 로깅
-                            logger.debug(f"🔍 Full unknown event: {json.dumps(res, indent=2, ensure_ascii=False)}")
+                            logger.error(f"OpenAI Error: {res}")
 
                 except Exception as e:
-                    logger.error(f"❌ Error in send_to_twilio: {e}")
+                    logger.error(f"Error in send_to_twilio: {e}")
                     import traceback
                     traceback.print_exc()
 
             async def handle_interruption():
                 nonlocal last_assistant_item, response_start_timestamp_twilio
-                logger.info("🛑 Handling speech interruption")
                 elapsed = latest_media_timestamp - response_start_timestamp_twilio
-                logger.debug(f"⏱️ Elapsed time for truncation: {elapsed}ms")
                 await openai_ws.send(json.dumps({
                     "type": "conversation.item.truncate",
                     "item_id": last_assistant_item,
@@ -283,7 +228,6 @@ async def handle_media_stream(websocket: WebSocket):
                 mark_queue.clear()
                 last_assistant_item = None
                 response_start_timestamp_twilio = None
-                logger.info("✂️ Interruption handled - audio truncated and cleared")
 
             async def send_mark(ws, sid):
                 if sid:
@@ -293,21 +237,17 @@ async def handle_media_stream(websocket: WebSocket):
                         "mark": {"name": "responsePart"}
                     })
                     mark_queue.append("responsePart")
-                    logger.debug(f"🏷️ Sent mark to Twilio")
-
-            logger.info("🔄 Starting main communication loops...")
             await asyncio.gather(receive_from_twilio(), send_to_twilio())
 
     except Exception as e:
-        logger.error(f"❌ Error in media stream: {e}")
+        logger.error(f"Error in media stream: {e}")
         import traceback
         traceback.print_exc()
     finally:
-        logger.info("🔌 WebSocket connection closed")
+        logger.info("WebSocket closed")
 
 
 async def send_session_update(openai_ws):
-    logger.info("📤 Sending session update to OpenAI...")
     # 세션 설정
     await openai_ws.send(json.dumps({
         "type": "session.update",
@@ -321,10 +261,8 @@ async def send_session_update(openai_ws):
             "temperature": 0.6
         }
     }))
-    logger.info("⚙️ Session configuration sent")
 
     # 시스템이 먼저 인사하도록 설정
-    logger.info("💬 Creating initial greeting message...")
     await openai_ws.send(json.dumps({
         "type": "conversation.item.create",
         "item": {
@@ -336,17 +274,14 @@ async def send_session_update(openai_ws):
             }]
         }
     }))
-    logger.info("📝 Initial greeting message created")
 
     # AI가 응답을 생성하도록 트리거
-    logger.info("🚀 Triggering initial response creation...")
     await openai_ws.send(json.dumps({
         "type": "response.create",
         "response": {
             "modalities": ["text", "audio"]
         }
     }))
-    logger.info("✅ Initial response creation triggered")
 
 
 # Run server
